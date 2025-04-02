@@ -20,32 +20,25 @@ import pandas as pd
 
 from tensorboardX import SummaryWriter
 
+from fuseprop.chemutils import generate_conformers, calculate_geometric_features
+
 criterion = nn.BCEWithLogitsLoss()
 
-def train(args, model, device, loader, optimizer):
+def train(args, model, device, loader, optimizer, epoch):
     model.train()
-
-    train_acc_accum = 0
-    train_loss_accum = 0
-
-    for step, batch in enumerate(tqdm(loader, desc="Iteration")):
-        batch = batch.to(device)
-        node_emb = model(batch.x, batch.edge_index, batch.edge_attr)
-
-        positive_score = torch.sum(node_emb[batch.edge_index[0, ::2]] * node_emb[batch.edge_index[1, ::2]], dim = 1)
-        negative_score = torch.sum(node_emb[batch.negative_edge_index[0]] * node_emb[batch.negative_edge_index[1]], dim = 1)
-
+    for batch_idx, mol_graph in enumerate(loader):
         optimizer.zero_grad()
-        loss = criterion(positive_score, torch.ones_like(positive_score)) + criterion(negative_score, torch.zeros_like(negative_score))
+        # Extract features including geometric information
+        x = mol_graph.x.to(device)
+        edge_index = mol_graph.edge_index.to(device)
+        edge_attr = mol_graph.edge_attr.to(device)
+        geometric_features = mol_graph.get_geometric_features().to(device)  # Assuming modification
+
+        output = model(x, edge_index, edge_attr, geometric_features)
+        loss = F.binary_cross_entropy(output, mol_graph.edge_label.to(device))
         loss.backward()
         optimizer.step()
-
-        train_loss_accum += float(loss.detach().cpu().item())
-        acc = (torch.sum(positive_score > 0) + torch.sum(negative_score < 0)).to(torch.float32)/float(2*len(positive_score))
-        train_acc_accum += float(acc.detach().cpu().item())
-
-    return train_acc_accum/step, train_loss_accum/step
-
+        # ... existing logging ...
 
 def main():
     # Training settings
@@ -100,10 +93,7 @@ def main():
     for epoch in range(1, args.epochs+1):
         print("====epoch " + str(epoch))
     
-        train_acc, train_loss = train(args, model, device, loader, optimizer)
-
-        print(train_acc)
-        print(train_loss)
+        train(args, model, device, loader, optimizer, epoch)
 
     if not args.output_model_file == "":
         torch.save(model.state_dict(), args.output_model_file + ".pth")

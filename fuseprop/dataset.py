@@ -9,24 +9,33 @@ from fuseprop.mol_graph import MolGraph
 
 class MoleculeDataset(Dataset):
 
-    def __init__(self, data, avocab, batch_size):
-        self.batches = [data[i : i + batch_size] for i in range(0, len(data), batch_size)]
-        self.avocab = avocab
+    def __init__(self, root, dataset, transform=None):
+        self.data = self.load_dataset(root, dataset)
+        self.transform = transform
+
+    def load_dataset(self, root, dataset):
+        """
+        Load molecules and generate MolGraph instances with 3D features.
+        """
+        with open(os.path.join(root, dataset + ".txt"), 'r') as f:
+            smiles_list = f.read().splitlines()
+        
+        mol_graphs = []
+        for smiles in smiles_list:
+            mol = Chem.MolFromSmiles(smiles)
+            if mol:
+                mol_graph = MolGraph(mol)
+                mol_graphs.append(mol_graph)
+        return mol_graphs
 
     def __len__(self):
-        return len(self.batches)
+        return len(self.data)
 
     def __getitem__(self, idx):
-        init_smiles, final_smiles = zip(*self.batches[idx])
-        init_batch = [Chem.MolFromSmiles(x) for x in init_smiles]
-        mol_batch = [Chem.MolFromSmiles(x) for x in final_smiles]
-        init_atoms = [mol.GetSubstructMatch(x) for mol,x in zip(mol_batch, init_batch)]
-        mol_batch = [MolGraph(x, atoms) for x, atoms in zip(final_smiles, init_atoms)]
-        mol_batch = [x for x in mol_batch if len(x.root_atoms) > 0]
-        if len(mol_batch) < len(self.batches[idx]):
-            num = len(self.batches[idx]) - len(mol_batch)
-            print("MoleculeDataset: %d graph removed" % (num,))
-        return MolGraph.tensorize(mol_batch, self.avocab) if len(mol_batch) > 0 else None
+        mol_graph = self.data[idx]
+        if self.transform:
+            mol_graph = self.transform(mol_graph)
+        return mol_graph
 
 
 class ReconstructDataset(Dataset):

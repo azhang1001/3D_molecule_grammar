@@ -7,6 +7,7 @@ from fuseprop.encoder import GraphEncoder
 from fuseprop.mol_graph import MolGraph
 from fuseprop.inc_graph import IncGraph
 from collections import deque
+from fuseprop.chemutils import calculate_geometric_features
 
 class HTuple():
     def __init__(self, node=None, mess=None, vmask=None, emask=None):
@@ -247,4 +248,44 @@ class GraphDecoder(nn.Module):
                 queue[bid].append(yid)
                
         return graph_batch.get_mol()
+
+
+class GrafDecoder(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim):
+        super(GrafDecoder, self).__init__()
+        self.fc1 = nn.Linear(input_dim + 3, hidden_dim)  # Adding 3 for 3D coordinates
+        self.fc2 = nn.Linear(hidden_dim, output_dim)
+
+    def forward(self, node_features, geometric_features):
+        """
+        Forward pass incorporating geometric features.
+        """
+        combined = torch.cat([node_features, geometric_features], dim=1)
+        x = F.relu(self.fc1(combined))
+        x = self.fc2(x)
+        return F.log_softmax(x, dim=1)
+
+    def generate_molecule(self, node_outputs, edge_outputs, geometric_outputs):
+        """
+        Generate RDKit molecule from outputs including geometry.
+        """
+        mol = Chem.RWMol()
+        atom_positions = {}
+        for idx, (atom_type, pos) in enumerate(zip(node_outputs['atom_type'], geometric_outputs['positions'])):
+            atom = Chem.Atom(atom_type)
+            mol.AddAtom(atom)
+            atom_positions[idx] = pos.detach().cpu().numpy()
+        
+        for (u, v), bond_type in edge_outputs['bonds']:
+            mol.AddBond(int(u), int(v), Chem.BondType[bond_type])
+
+        # Embed 3D coordinates
+        mol = mol.GetMol()
+        conf = Chem.Conformer(mol.GetNumAtoms())
+        for idx in range(mol.GetNumAtoms()):
+            pos = atom_positions[idx]
+            conf.SetAtomPosition(idx, Chem.rdGeometry.Point3D(*pos))
+        mol.AddConformer(conf)
+        
+        return mol
 

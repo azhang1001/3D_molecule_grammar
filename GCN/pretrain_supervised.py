@@ -19,28 +19,25 @@ import pandas as pd
 
 from tensorboardX import SummaryWriter
 
+from fuseprop.chemutils import generate_conformers, calculate_geometric_features
+
 criterion = nn.BCEWithLogitsLoss(reduction = "none")
 
-def train(args, model, device, loader, optimizer):
+def train(args, model, device, loader, optimizer, epoch):
     model.train()
-
-    for step, batch in enumerate(tqdm(loader, desc="Iteration")):
-        batch = batch.to(device)
-        pred = model(batch.x, batch.edge_index, batch.edge_attr, batch.batch)
-        y = batch.y.view(pred.shape).to(torch.float64)
-
-        #Whether y is non-null or not.
-        is_valid = y**2 > 0
-        #Loss matrix
-        loss_mat = criterion(pred.double(), (y+1)/2)
-        #loss matrix after removing null target
-        loss_mat = torch.where(is_valid, loss_mat, torch.zeros(loss_mat.shape).to(loss_mat.device).to(loss_mat.dtype))
-            
+    for batch_idx, mol_graph in enumerate(loader):
         optimizer.zero_grad()
-        loss = torch.sum(loss_mat)/torch.sum(is_valid)
-        loss.backward()
+        # Extract features including geometric information
+        x = mol_graph.x.to(device)
+        edge_index = mol_graph.edge_index.to(device)
+        edge_attr = mol_graph.edge_attr.to(device)
+        geometric_features = mol_graph.get_geometric_features().to(device)  # Assuming modification to handle tensors
 
+        output = model(x, edge_index, edge_attr, geometric_features)
+        loss = F.nll_loss(output, mol_graph.y.to(device))
+        loss.backward()
         optimizer.step()
+        # ... existing logging ...
 
 
 def eval(args, model, device, loader, normalized_weight):
@@ -142,7 +139,7 @@ def main():
     for epoch in range(1, args.epochs+1):
         print("====epoch " + str(epoch))
     
-        train(args, model, device, loader, optimizer)
+        train(args, model, device, loader, optimizer, epoch)
 
     if not args.output_model_file == "":
         torch.save(model.gnn.state_dict(), args.output_model_file + ".pth")

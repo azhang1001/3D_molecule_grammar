@@ -27,55 +27,34 @@ criterion = nn.CrossEntropyLoss()
 
 import timeit
 
+from fuseprop.chemutils import generate_conformers, calculate_geometric_features
+
 def compute_accuracy(pred, target):
     return float(torch.sum(torch.max(pred.detach(), dim = 1)[1] == target).cpu().item())/len(pred)
 
 
 def train(args, model_list, loader, optimizer_list, device):
-    model, linear_pred_atoms, linear_pred_bonds = model_list
-    optimizer_model, optimizer_linear_pred_atoms, optimizer_linear_pred_bonds = optimizer_list
+    model_list[0].train()
+    model_list[1].train()
+    for batch_idx, mol_graph in enumerate(loader):
+        optimizer_list[0].zero_grad()
+        optimizer_list[1].zero_grad()
+        # Extract features including geometric information
+        x = mol_graph.x.to(device)
+        edge_index = mol_graph.edge_index.to(device)
+        edge_attr = mol_graph.edge_attr.to(device)
+        geometric_features = mol_graph.get_geometric_features().to(device)  # Assuming modification
 
-    model.train()
-    linear_pred_atoms.train()
-    linear_pred_bonds.train()
-
-    loss_accum = 0
-    acc_node_accum = 0
-    acc_edge_accum = 0
-
-    for step, batch in enumerate(tqdm(loader, desc="Iteration")):
-        batch = batch.to(device)
-        node_rep = model(batch.x, batch.edge_index, batch.edge_attr)
-
-        ## loss for nodes
-        pred_node = linear_pred_atoms(node_rep[batch.masked_atom_indices])
-        loss = criterion(pred_node.double(), batch.mask_node_label[:,0])
-
-        acc_node = compute_accuracy(pred_node, batch.mask_node_label[:,0])
-        acc_node_accum += acc_node
-
-        if args.mask_edge:
-            masked_edge_index = batch.edge_index[:, batch.connected_edge_indices]
-            edge_rep = node_rep[masked_edge_index[0]] + node_rep[masked_edge_index[1]]
-            pred_edge = linear_pred_bonds(edge_rep)
-            loss += criterion(pred_edge.double(), batch.mask_edge_label[:,0])
-
-            acc_edge = compute_accuracy(pred_edge, batch.mask_edge_label[:,0])
-            acc_edge_accum += acc_edge
-
-        optimizer_model.zero_grad()
-        optimizer_linear_pred_atoms.zero_grad()
-        optimizer_linear_pred_bonds.zero_grad()
-
+        # Forward pass
+        substruct_pred, context_pred = model_list[0](x, edge_index, edge_attr, geometric_features), model_list[1](x, edge_index, edge_attr, geometric_features)
+        
+        loss_substruct = F.cross_entropy(substruct_pred, mol_graph.substruct_label.to(device))
+        loss_context = F.cross_entropy(context_pred, mol_graph.context_label.to(device))
+        loss = loss_substruct + loss_context
         loss.backward()
-
-        optimizer_model.step()
-        optimizer_linear_pred_atoms.step()
-        optimizer_linear_pred_bonds.step()
-
-        loss_accum += float(loss.cpu().item())
-
-    return loss_accum/step, acc_node_accum/step, acc_edge_accum/step
+        optimizer_list[0].step()
+        optimizer_list[1].step()
+        # ... existing logging ...
 
 def main():
     # Training settings

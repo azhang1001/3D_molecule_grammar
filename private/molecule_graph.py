@@ -5,12 +5,16 @@ from .hypergraph import mol_to_hg
 from GCN.feature_extract import feature_extractor
 from copy import deepcopy
 import numpy as np
+from fuseprop.chemutils import generate_conformers, calculate_geometric_features
 
 class MolGraph():
     def __init__(self, mol, is_subgraph=False, mapping_to_input_mol=None):
-        if is_subgraph:
-            assert mapping_to_input_mol is not None
         self.mol = mol
+        if not is_subgraph:
+            mol = generate_conformers(mol)
+            self.conformers = calculate_geometric_features(mol)
+        else:
+            self.conformers = []
         self.is_subgraph = is_subgraph
         self.hypergraph = mol_to_hg(mol, kekulize=True, add_Hs=False)
         self.mapping_to_input_mol = mapping_to_input_mol
@@ -65,6 +69,15 @@ class MolGraph():
     def __eq__(self, another):
         # return hasattr(another, 'mol') and Chem.CanonSmiles(Chem.MolToSmiles(self.mol)) == Chem.CanonSmiles(Chem.MolToSmiles(another.mol))
         return hasattr(another, 'mol') and (Chem.MolToSmiles(self.mol)) == (Chem.MolToSmiles(another.mol))
+
+    def get_geometric_features(self, conformer_id=0):
+        """
+        Retrieve geometric features for a specific conformer.
+        """
+        if conformer_id < len(self.conformers):
+            return self.conformers[conformer_id]
+        else:
+            return {}
 
 
 class MolKey():

@@ -70,3 +70,19 @@ class GraphEncoder(nn.Module):
         hatom,_ = self.encoder(*tensors, mask=None)
         return hatom
 
+
+class GeometricEncoder(nn.Module):
+    def __init__(self, input_dim, hidden_dim):
+        super(GeometricEncoder, self).__init__()
+        self.fc1 = nn.Linear(input_dim + 3, hidden_dim)  # Adding 3 for 3D coordinates
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+
+    def forward(self, node_features, geometric_features):
+        """
+        Forward pass incorporating geometric features.
+        """
+        x = torch.cat([node_features, geometric_features], dim=1)
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+        return x
+

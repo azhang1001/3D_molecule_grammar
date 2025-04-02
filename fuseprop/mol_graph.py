@@ -7,6 +7,7 @@ from fuseprop.chemutils import *
 from fuseprop.nnutils import *
 from fuseprop.vocab import common_atom_vocab
 from collections import deque
+from fuseprop.chemutils import generate_conformers, calculate_geometric_features
 
 add = lambda x,y : x + y if type(x) is int else (x[0] + y, x[1] + y)
 
@@ -154,4 +155,18 @@ class MolGraph(object):
         agraph = create_pad_tensor(agraph)
         bgraph = create_pad_tensor(bgraph)
         return (fnode, fmess, agraph, bgraph, scope), nx.union_all(all_G)
+
+    def construct_graph(self):
+        """
+        Constructs the molecular graph including geometrical features.
+        """
+        # ... existing graph construction code ...
+
+        # Incorporate geometric features
+        for conf_features in self.conformers:
+            for feature_name, value in conf_features.items():
+                # Example: Adding bond lengths and angles as additional node/edge attributes
+                pass  # Modify attributes accordingly
+
+        return self.graph
 

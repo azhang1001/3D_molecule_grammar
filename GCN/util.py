@@ -11,6 +11,7 @@ from loader import mol_to_graph_data_obj_simple, \
     graph_data_obj_to_mol_simple
 
 from loader import MoleculeDataset
+from fuseprop.chemutils import calculate_geometric_features
 
 
 def check_same_molecules(s1, s2):
@@ -280,6 +281,42 @@ class MaskAtom:
         return '{}(num_atom_type={}, num_edge_type={}, mask_rate={}, mask_edge={})'.format(
             self.__class__.__name__, self.num_atom_type, self.num_edge_type,
             self.mask_rate, self.mask_edge)
+
+
+def prepare_data(mol_graph):
+    """
+    Prepare data tensors including geometric features.
+    """
+    x = mol_graph.x  # Existing atom features
+    edge_index = mol_graph.edge_index
+    edge_attr = mol_graph.edge_attr
+    
+    geometric_features = mol_graph.get_geometric_features()  # Dictionary of geometric features
+    
+    # Convert geometric features to tensor (e.g., bond lengths and angles)
+    geo_tensor = torch.tensor([geo for _, geo in sorted(geometric_features.items())], dtype=torch.float)
+    
+    return x, edge_index, edge_attr, geo_tensor
+
+def collate_fn(batch):
+    """
+    Custom collate function to handle batches with geometric features.
+    """
+    batch_x, batch_edge_index, batch_edge_attr, batch_geo = [], [], [], []
+    for mol_graph in batch:
+        x, edge_index, edge_attr, geo = prepare_data(mol_graph)
+        batch_x.append(x)
+        batch_edge_index.append(edge_index)
+        batch_edge_attr.append(edge_attr)
+        batch_geo.append(geo)
+    
+    # Concatenate all batch components
+    batch_x = torch.cat(batch_x, dim=0)
+    batch_edge_index = torch.cat(batch_edge_index, dim=1)
+    batch_edge_attr = torch.cat(batch_edge_attr, dim=0)
+    batch_geo = torch.cat(batch_geo, dim=0)
+    
+    return batch_x, batch_edge_index, batch_edge_attr, batch_geo
 
 
 if __name__ == "__main__":

@@ -5,6 +5,8 @@ from rdkit import Chem
 from rdkit.Chem import rdFMCS
 from collections import defaultdict, deque
 from fuseprop.vocab import MAX_VALENCE
+from rdkit.Chem import AllChem
+from rdkit.Chem import Descriptors
 
 lg = rdkit.RDLogger.logger() 
 lg.setLevel(rdkit.RDLogger.CRITICAL)
@@ -415,4 +417,39 @@ def __merge_molecules(xmol, ymol, mx, my):
         return new_mol
     else:
         return None
+
+def generate_conformers(mol, num_conformers=10):
+    """
+    Generate 3D conformers for a molecule.
+    """
+    mol = Chem.AddHs(mol)
+    params = AllChem.ETKDGv3()
+    params.numThreads = 0  # Use all available cores
+    AllChem.EmbedMultipleConfs(mol, numConformers=num_conformers, params=params)
+    AllChem.UFFOptimizeMolecules(mol)
+    return mol
+
+def calculate_geometric_features(mol):
+    """
+    Calculate bond lengths and angles for a molecule's conformers.
+    Returns a list of dictionaries containing bond lengths and angles for each conformer.
+    """
+    geometric_features = []
+    for conf in mol.GetConformers():
+        features = {}
+        # Calculate bond lengths
+        for bond in mol.GetBonds():
+            begin_atom = bond.GetBeginAtomIdx()
+            end_atom = bond.GetEndAtomIdx()
+            bond_length = mol.GetConformer(conf.GetId()).GetBondLength(begin_atom, end_atom)
+            features[f"bond_{begin_atom}_{end_atom}_length"] = bond_length
+        # Calculate bond angles
+        for atom in mol.GetAtoms():
+            neighbors = [nbr.GetIdx() for nbr in atom.GetNeighbors()]
+            if len(neighbors) >= 2:
+                for pair in itertools.combinations(neighbors, 2):
+                    angle = Chem.rdMolTransforms.GetAngleDeg(mol.GetConformer(conf.GetId()), pair[0], atom.GetIdx(), pair[1])
+                    features[f"angle_{pair[0]}_{atom.GetIdx()}_{pair[1]}"] = angle
+        geometric_features.append(features)
+    return geometric_features
 

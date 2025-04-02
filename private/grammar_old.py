@@ -1,5 +1,5 @@
 from private.symbol import TSymbol, NTSymbol, BondSymbol
-from private.utils import _node_match, _node_match_prod_rule, _edge_match, masked_softmax, align_substructure, transfer_coordinates_after_rule_application
+from private.utils import _node_match, _node_match_prod_rule, _edge_match, masked_softmax
 from private.hypergraph import Hypergraph, common_node_list
 from collections import Counter
 from copy import deepcopy
@@ -13,7 +13,6 @@ import torch
 import os
 import random
 import warnings
-from rdkit.Chem import AllChem
 
 DEBUG = False
 
@@ -71,24 +70,11 @@ class ProductionRule(object):
 
     @property
     def lhs_nt_symbol(self) -> NTSymbol:
-        """
-        Return the non-terminal symbol from the LHS.
-        This should be a single NTSymbol, not a list.
-        """
         if self.is_start_rule:
             return NTSymbol(degree=0, is_aromatic=False, bond_symbol_list=[])
         else:
-            # Find the non-terminal edge in the LHS
-            for edge in self.lhs.edges:
-                edge_symbol = self.lhs.edge_attr(edge)['symbol']
-                # Check if this is a non-terminal symbol
-                if (isinstance(edge_symbol, NTSymbol) and 
-                    not self.lhs.edge_attr(edge).get('terminal', True)):
-                    return edge_symbol
-            
-            # Fallback to the first edge if no non-terminal is found
-            # (should not happen in properly formed rules)
-            return self.lhs.edge_attr(list(self.lhs.edges)[0])['symbol']
+            # return self.lhs.edge_attr(list(self.lhs.edges)[0])['symbol']
+            return [self.lhs.edge_attr(edge)['symbol'] for edge in list(self.lhs.edges)]
 
     def rhs_adj_mat(self, node_edge_list):
         ''' return the adjacency matrix of rhs of the production rule
@@ -161,58 +147,146 @@ class ProductionRule(object):
         except StopIteration:
             return False, {}
 
-    def graph_rule_applied_to(self, hypergraph):
-        """Apply this production rule to a hypergraph, preserving 3D geometry
-        
+    def graph_rule_applied_to(self, input_hg, selected_edge=None, selected_iso_mapping=None, vis=False):
+        """ augment `hg` by replacing `edge` with `self.rhs`.
+
         Parameters
         ----------
-        hypergraph : Hypergraph
-            The hypergraph to apply the rule to
-            
+        hg : Hypergraph
+        edge : str
+            `edge` must belong to `hg`
+
         Returns
         -------
-        new_hypergraph : Hypergraph
-            The hypergraph after applying the rule
-        mapping : dict
-            Mapping from nodes in the rule to nodes in the result
-        success : bool
-            Whether the rule was successfully applied
+        hg : Hypergraph
+            resultant hypergraph
+        nt_edge_list : list
+            list of non-terminal edges
         """
-        from private.utils import align_substructure
-        
-        # Previous rule application logic...
-        # [...]
-        
-        # After successful application:
-        
-        # If we have 3D coordinates in both the rule and the target graph
-        if hasattr(self.rhs, 'coordinates') and hasattr(hypergraph, 'coordinates'):
-            # Identify connection points between existing graph and the rule's RHS
-            connection_points = []
-            for node in common_nodes:
-                # Find edges in the original graph and the RHS that contain this node
-                orig_edges = [e for e in hypergraph.edges if node in hypergraph.nodes_in_edge(e)]
-                rhs_edges = [e for e in self.rhs.edges if node in self.rhs.nodes_in_edge(e)]
-                
-                for orig_edge in orig_edges:
-                    for rhs_edge in rhs_edges:
-                        # Same atom type?
-                        if hypergraph.edge_attr(orig_edge)['symbol'] == self.rhs.edge_attr(rhs_edge)['symbol']:
-                            # These are corresponding atoms that should be aligned
-                            connection_points.append((orig_edge, rhs_edge))
-            
-            # Get coordinates from original graph and rule RHS
-            fixed_coords = {edge: hypergraph.get_coordinates(edge) for edge in hypergraph.edges}
-            moving_coords = {edge: self.rhs.get_coordinates(edge) for edge in self.rhs.edges}
-            
-            # Align the new substructure
-            transformed_coords = align_substructure(fixed_coords, moving_coords, connection_points)
-            
-            # Apply transformed coordinates to the new graph
-            for edge, coords in transformed_coords.items():
-                new_hypergraph.set_coordinates(edge, coords)
-                
-        return new_hypergraph, mapping, success
+        hg = deepcopy(input_hg)
+        nt_edge_dict = {}
+        if self.is_start_rule:
+            node_idx = hg.num_nodes
+            # hg = Hypergraph()
+            node_map_rhs = {} # node id in rhs -> node id in hg, where rhs is augmented.
+            for num_idx, each_node in enumerate(self.rhs.nodes):
+                hg.add_node(f"bond_{num_idx+node_idx}",
+                            attr_dict=self.rhs.node_attr(each_node))
+                node_map_rhs[each_node] = f"bond_{num_idx+node_idx}"
+            for each_edge in self.rhs.edges:
+                node_list = []
+                for each_node in self.rhs.nodes_in_edge(each_edge):
+                    node_list.append(node_map_rhs[each_node])
+                if isinstance(self.rhs.nodes_in_edge(each_edge), set):
+                    node_list = set(node_list)
+                edge_id = hg.add_edge(
+                    node_list,
+                    attr_dict=self.rhs.edge_attr(each_edge))
+                if "nt_idx" in hg.edge_attr(edge_id):
+                    nt_edge_dict[hg.edge_attr(edge_id)["nt_idx"]] = edge_id
+            nt_edge_list = [nt_edge_dict[key] for key in range(len(nt_edge_dict))]
+            return hg, nt_edge_list, True
+        else:
+            hg_NT_edges = hg.get_all_NT_edges()
+            lhs_NT_edges = self.lhs.get_all_NT_edges()
+            match_flag = []
+            lhs_hg_matched_edge_dict = {}
+            assert len(lhs_NT_edges) == 1
+
+            # print("NTs:")
+            # print([edge.edges for edge in hg_NT_edges])
+            # print([edge.edge_attr(list(edge.edges)[0])['symbol'].symbol for edge in hg_NT_edges])
+            # eq = lhs_NT_edges[0] == hg_NT_edges[0]
+
+            for lhs_edge in lhs_NT_edges:
+                if lhs_edge in hg_NT_edges:
+                    match_flag.append(True)
+                    assert len(lhs_edge.edges) == 1
+                    for hg_NT_edge in hg_NT_edges:
+                        if hg_NT_edge == lhs_edge:
+                            if list(lhs_edge.edges)[0] not in lhs_hg_matched_edge_dict.keys():
+                                lhs_hg_matched_edge_dict[list(lhs_edge.edges)[0]] = [hg_NT_edge]
+                            else:
+                                lhs_hg_matched_edge_dict[list(lhs_edge.edges)[0]].append(hg_NT_edge)
+                else:
+                    match_flag.append(False)
+
+            if not all(match_flag):
+                return hg, [], False
+
+            # for edge in hg.edges:
+                # print("edge: {} -> nodes: {}".format(edge, hg.nodes_in_edge(edge)))
+
+            # order of nodes that belong to the non-terminal edge in hg
+            nt_order_dict = {}  # hg_node -> order ("bond_17" : 1)
+            nt_order_dict_inv = {} # order -> hg_node
+            to_rm_edges = []
+            assert len(lhs_NT_edges) == 1
+            for _i, edge_lhs in enumerate(lhs_NT_edges):
+                edges_hg = lhs_hg_matched_edge_dict[list(edge_lhs.edges)[0]]
+                edges_name_to_hg = {list(edge_hg.edges)[0]:edge_hg for edge_hg in edges_hg}
+                edges_cand = edges_name_to_hg.keys()
+                # filter out those removed edges in previous iterations
+                edges = [_edge for _edge in edges_cand if _edge not in to_rm_edges]
+                # if it is empty, meaning that there is only actually one NT in hg that matches multiple NTs in the lhs, the rule should be abandoned
+                if len(edges) == 0:
+                    return hg, [], False
+                # TODO add options
+                edge = selected_edge
+                if edge == None:
+                    edge = np.random.choice(edges, 1)[0]
+                # print('selected edge:', edge)
+                # edge_hg = edges_hg[edges_cand.index(edge)]
+                edge_hg = edges_name_to_hg[edge]
+                iso_mappings = edge_hg.find_isomorphism_mapping(edge_lhs, vis) # From edge_hg to edge_lhs
+                # print("mapping:", iso_mapping)
+                if selected_iso_mapping is None:
+                    iso_mapping = np.random.choice(iso_mappings, 1)[0]
+                else:
+                    iso_mapping = selected_iso_mapping
+
+                for each_idx, each_node in enumerate(hg.nodes_in_edge(edge)):
+                    mapped_node_in_lhs = iso_mapping[each_node]
+                    ext_id = edge_lhs.node_attr(mapped_node_in_lhs)['ext_id']
+                    nt_order_dict[each_node] = ext_id
+                    nt_order_dict_inv[ext_id] = each_node
+                to_rm_edges.append(edge)
+
+            for edge in to_rm_edges:
+                # delete non-terminal
+                hg.remove_edge(edge)
+
+            # construct a node_map_rhs: rhs -> new hg
+            node_map_rhs = {} # node id in rhs -> node id in hg, where rhs is augmented.
+            node_idx = hg.num_nodes
+            for each_node in self.rhs.nodes:
+                if "ext_id" in self.rhs.node_attr(each_node):
+                    node_map_rhs[each_node] \
+                            = nt_order_dict_inv[
+                                    self.rhs.node_attr(each_node)["ext_id"]]
+                else:
+                    node_map_rhs[each_node] = f"bond_{node_idx}"
+                    node_idx += 1
+
+            # add nodes to hg
+            for each_node in self.rhs.nodes:
+                hg.add_node(node_map_rhs[each_node],
+                        attr_dict=self.rhs.node_attr(each_node))
+
+            # add hyperedges to hg
+            for each_edge in self.rhs.edges:
+                node_list_hg = []
+                for each_node in self.rhs.nodes_in_edge(each_edge):
+                    node_list_hg.append(node_map_rhs[each_node])
+                edge_id = hg.add_edge(
+                        node_list_hg,
+                        attr_dict=self.rhs.edge_attr(each_edge))#deepcopy(self.rhs.edge_attr(each_edge)))
+                if "nt_idx" in hg.edge_attr(edge_id):
+                    nt_edge_dict[hg.edge_attr(edge_id)["nt_idx"]] = edge_id
+            nt_edge_list = [nt_edge_dict[key] for key in range(len(nt_edge_dict))]
+
+
+            return hg, nt_edge_list, True
 
     def get_all_compatible_edges(self, input_hg):
         hg = deepcopy(input_hg)
@@ -264,44 +338,33 @@ class ProductionRule(object):
         return selected_edges, selected_iso_mappings
                 
 
-    def applied_to(self, hg, edge_name, ignore_order=False, return_success=False):
-        """
-        Apply the production rule to a hypergraph.
-        
+    def applied_to(self,
+            hg: Hypergraph,
+            edge: str) -> Tuple[Hypergraph, List[str]]:
+        """ augment `hg` by replacing `edge` with `self.rhs`.
+
         Parameters
         ----------
         hg : Hypergraph
-        edge_name : str
-            name of a hyperedge to be replaced
-        ignore_order : bool
-            whether to ignore bond order when comparing
-            
+        edge : str
+            `edge` must belong to `hg`
+
         Returns
         -------
         hg : Hypergraph
-            a copy of input hypergraph to which the rule is applied
-        isomap : dict
-            mapping from node/edge names to node/edge names
-        success : bool (optional)
-            indicates if application was successful
+            resultant hypergraph
+        nt_edge_list : list
+            list of non-terminal edges
         """
-        from private.utils import transfer_coordinates_after_rule_application
-        from copy import deepcopy
-        
-        # Create a deep copy to avoid modifying the original
-        original_hg = hg  # Save reference to original
-        hg = deepcopy(hg)  # Work on a copy instead
-        
         nt_edge_dict = {}
         if self.is_start_rule:
-            # Handle start rule case
-            # This part remains mostly unchanged
-            if (edge_name is not None) or (hg is not None):
-                ValueError("edge_name and hg must be None for this prod rule.")
+            if (edge is not None) or (hg is not None):
+                ValueError("edge and hg must be None for this prod rule.")
             hg = Hypergraph()
-            node_map_rhs = {}  # node id in rhs -> node id in hg, where rhs is augmented.
+            node_map_rhs = {} # node id in rhs -> node id in hg, where rhs is augmented.
             for num_idx, each_node in enumerate(self.rhs.nodes):
                 hg.add_node(f"bond_{num_idx}",
+                        #attr_dict=deepcopy(self.rhs.node_attr(each_node)))
                         attr_dict=self.rhs.node_attr(each_node))
                 node_map_rhs[each_node] = f"bond_{num_idx}"
             for each_edge in self.rhs.edges:
@@ -312,37 +375,32 @@ class ProductionRule(object):
                     node_list = set(node_list)
                 edge_id = hg.add_edge(
                         node_list,
+                        #attr_dict=deepcopy(self.rhs.edge_attr(each_edge)))
                         attr_dict=self.rhs.edge_attr(each_edge))
-                
-                # Add coordinates if they exist in RHS
-                if each_edge in self.rhs.coordinates:
-                    hg.set_coordinates(edge_id, self.rhs.coordinates[each_edge])
-                    
                 if "nt_idx" in hg.edge_attr(edge_id):
                     nt_edge_dict[hg.edge_attr(edge_id)["nt_idx"]] = edge_id
             nt_edge_list = [nt_edge_dict[key] for key in range(len(nt_edge_dict))]
-            isomap = {}
-            for key, val in nt_edge_dict.items():
-                isomap[key] = val
-            if return_success:
-                return hg, isomap, True
-            else:
-                return hg, isomap
+            return hg, nt_edge_list
         else:
-            # Normal rule application (non-start rule)
-            if edge_name not in hg.edges:
+            if edge not in hg.edges:
                 raise ValueError("the input hyperedge does not exist.")
-            if hg.edge_attr(edge_name)["terminal"]:
+            if hg.edge_attr(edge)["terminal"]:
                 raise ValueError("the input hyperedge is terminal.")
-            if hg.edge_attr(edge_name)['symbol'] != self.lhs_nt_symbol:
-                print(hg.edge_attr(edge_name)['symbol'])
-                print(self.lhs_nt_symbol)
-                raise ValueError("the input hyperedge and lhs have inconsistent nodes.")
-            
+            if hg.edge_attr(edge)['symbol'] != self.lhs_nt_symbol:
+                print(hg.edge_attr(edge)['symbol'], self.lhs_nt_symbol)
+                raise ValueError("the input hyperedge and lhs have inconsistent number of nodes.")
+            if DEBUG:
+                for node_idx, each_node in enumerate(hg.nodes_in_edge(edge)):
+                    other_node = self.lhs.nodes_in_edge(list(self.lhs.edges)[0])[node_idx]
+                    attr = deepcopy(self.lhs.node_attr(other_node))
+                    attr.pop('ext_id')
+                    if hg.node_attr(each_node) != attr:
+                        raise ValueError('node attributes are inconsistent.')
+
             # order of nodes that belong to the non-terminal edge in hg
             nt_order_dict = {}  # hg_node -> order ("bond_17" : 1)
             nt_order_dict_inv = {} # order -> hg_node
-            for each_idx, each_node in enumerate(hg.nodes_in_edge(edge_name)):
+            for each_idx, each_node in enumerate(hg.nodes_in_edge(edge)):
                 nt_order_dict[each_node] = each_idx
                 nt_order_dict_inv[each_idx] = each_node
 
@@ -358,110 +416,26 @@ class ProductionRule(object):
                     node_map_rhs[each_node] = f"bond_{node_idx}"
                     node_idx += 1
 
-            # Track edge mapping from RHS to result
-            edge_map_rhs = {}  # Maps RHS edge name to result edge name
-            
-            # Delete non-terminal
-            hg.remove_edge(edge_name)
+            # delete non-terminal
+            hg.remove_edge(edge)
 
-            # Add nodes to hg
+            # add nodes to hg
             for each_node in self.rhs.nodes:
                 hg.add_node(node_map_rhs[each_node],
                         attr_dict=self.rhs.node_attr(each_node))
 
-            # Track added edges to avoid duplicates
-            added_edges = set()
-            
-            # Find the carbon edge in the original graph that should be preserved
-            original_carbon_edge = None
-            for edge in original_hg.edges:
-                if edge != edge_name and "symbol" in original_hg.edge_attr(edge):
-                    symbol = original_hg.edge_attr(edge)["symbol"]
-                    if hasattr(symbol, "symbol") and symbol.symbol == "C":
-                        # This is a carbon atom
-                        for node in original_hg.nodes_in_edge(edge):
-                            if any(node_map_rhs.get(rhs_node) == node for rhs_node in self.rhs.nodes):
-                                # This carbon is connected to an anchor node
-                                original_carbon_edge = edge
-                                break
-
-            # Add hyperedges to hg
+            # add hyperedges to hg
             for each_edge in self.rhs.edges:
                 node_list_hg = []
                 for each_node in self.rhs.nodes_in_edge(each_edge):
                     node_list_hg.append(node_map_rhs[each_node])
-                    
-                # Check if this is the anchor carbon (connected to ext_id nodes)
-                is_anchor_carbon = False
-                if "symbol" in self.rhs.edge_attr(each_edge):
-                    symbol = self.rhs.edge_attr(each_edge)["symbol"]
-                    if hasattr(symbol, "symbol") and symbol.symbol == "C":
-                        # This is a carbon atom, check if it's connected to an ext_id node
-                        for node in self.rhs.nodes_in_edge(each_edge):
-                            if "ext_id" in self.rhs.node_attr(node):
-                                is_anchor_carbon = True
-                                break
-                
-                # If this is the anchor carbon and we found a matching original carbon,
-                # use the original carbon's edge ID and attributes
-                if is_anchor_carbon and original_carbon_edge is not None:
-                    # Use original carbon's edge ID
-                    edge_id = original_carbon_edge
-                    # Preserve its attributes
-                    attr_dict = original_hg.edge_attr(original_carbon_edge).copy()
-                    
-                    # Include all original bonds except the one to the replaced hydrogen
-                    # First get all original bonds connected to the carbon
-                    original_bonds = set(original_hg.nodes_in_edge(original_carbon_edge))
-                    
-                    # Add all these bonds to the node_list_hg if they still exist in the graph
-                    for bond in original_bonds:
-                        if bond in hg.nodes:
-                            # Skip the bond connecting to the replaced hydrogen
-                            skip_bond = False
-                            for edge in original_hg.edges:
-                                if (edge == edge_name and 
-                                    bond in original_hg.nodes_in_edge(edge)):
-                                    skip_bond = True
-                                    break
-                            
-                            if not skip_bond and bond not in node_list_hg:
-                                node_list_hg.append(bond)
-                    
-                    # Update the carbon edge with all bonds
-                    if edge_id in hg.edges:
-                        hg.remove_edge(edge_id)
-                    hg.add_edge(node_list_hg, attr_dict=attr_dict, edge_name=edge_id)
-                else:
-                    # Regular edge addition
-                    edge_id = hg.add_edge(
-                            node_list_hg,
-                            attr_dict=self.rhs.edge_attr(each_edge))
-                
-                # Record the mapping from RHS edge to result edge
-                edge_map_rhs[each_edge] = edge_id
-                
+                edge_id = hg.add_edge(
+                        node_list_hg,
+                        attr_dict=self.rhs.edge_attr(each_edge))#deepcopy(self.rhs.edge_attr(each_edge)))
                 if "nt_idx" in hg.edge_attr(edge_id):
                     nt_edge_dict[hg.edge_attr(edge_id)["nt_idx"]] = edge_id
-            
             nt_edge_list = [nt_edge_dict[key] for key in range(len(nt_edge_dict))]
-            isomap = {}
-            for key, val in nt_edge_dict.items():
-                isomap[key] = val
-            
-            # Now transfer coordinates from original hypergraph and RHS
-            hg = transfer_coordinates_after_rule_application(
-                hg,                  # Result hypergraph
-                original_hg,         # Original hypergraph 
-                self.rhs,            # Right-hand side of the rule
-                edge_map_rhs,        # Mapping from RHS edge names to result edge names
-                edge_name            # Name of the edge that was replaced
-            )
-            
-            if return_success:
-                return hg, isomap, True
-            else:
-                return hg, isomap
+            return hg, nt_edge_list
 
     def revert(self, hg: Hypergraph, return_subhg=False):
         ''' revert applying this production rule.

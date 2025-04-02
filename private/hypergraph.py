@@ -10,6 +10,7 @@ from private.utils import _node_match, _node_match_prod_rule, _edge_match, maske
 from functools import partial
 import numpy as np
 import os
+from rdkit.Chem import AllChem
 
 
 class Hypergraph(object):
@@ -24,6 +25,8 @@ class Hypergraph(object):
         a bipartite graph representation of a hypergraph
     edge_idx : int
         total number of hyperedges that exist so far
+    coordinates : dict
+        dictionary mapping edge names to their 3D coordinates
     '''
     def __init__(self):
         self.hg = nx.Graph()
@@ -33,6 +36,8 @@ class Hypergraph(object):
         self.edges = set([])
         self.num_edges = 0
         self.nodes_in_edge_dict = {}
+        # Add dictionary to store 3D coordinates for edges (atoms)
+        self.coordinates = {}
 
     def __eq__(self, another):
         if self.num_nodes != another.num_nodes:
@@ -400,7 +405,10 @@ class Hypergraph(object):
         -------
         Hypergraph
         '''
-        return deepcopy(self)
+        hg_copy = deepcopy(self)
+        # Make sure coordinates are properly copied
+        hg_copy.coordinates = deepcopy(self.coordinates)
+        return hg_copy
 
     def node_attr(self, node):
         return self.hg.nodes[node]['attr_dict']
@@ -674,6 +682,34 @@ class Hypergraph(object):
             #subhg_list[-1].set_node_attr(node, {'divided': True})
         return subhg_list
 
+    # Add methods to handle 3D coordinates
+    def set_coordinates(self, edge, coords):
+        """Set 3D coordinates for an edge (atom)
+        
+        Parameters
+        ----------
+        edge : str
+            edge name
+        coords : np.ndarray or list
+            3D coordinates [x, y, z]
+        """
+        self.coordinates[edge] = np.array(coords)
+    
+    def get_coordinates(self, edge):
+        """Get 3D coordinates for an edge (atom)
+        
+        Parameters
+        ----------
+        edge : str
+            edge name
+            
+        Returns
+        -------
+        np.ndarray
+            3D coordinates [x, y, z]
+        """
+        return self.coordinates.get(edge, np.array([0.0, 0.0, 0.0]))
+
 def mol_to_bipartite(mol, kekulize):
     """
     get a bipartite representation of a molecule.
@@ -740,9 +776,21 @@ def mol_to_hg(mol, kekulize, add_Hs):
     # if kekulize:
         # Chem.Kekulize(mol)
 
+    # Generate 3D coordinates if not already present
+    has_coords = mol.GetNumConformers() > 0
+    if not has_coords:
+        # Generate a conformer with coordinates
+        mol = Chem.AddHs(mol)
+        AllChem.EmbedMolecule(mol, randomSeed=42)
+        AllChem.MMFFOptimizeMolecule(mol)
+        mol = Chem.RemoveHs(mol) if not add_Hs else mol
 
     bipartite_g = mol_to_bipartite(mol, kekulize)
     hg = Hypergraph()
+    
+    # Dictionary to store atom indices mapped to edge names
+    atom_to_edge = {}
+    
     for each_atom in [each_node for each_node in bipartite_g.nodes()
                       if each_node.startswith('atom_')]:
         node_set = set([])
@@ -750,14 +798,26 @@ def mol_to_hg(mol, kekulize, add_Hs):
             hg.add_node(each_bond,
                         attr_dict=bipartite_g.nodes[each_bond]['bond_attr'])
             node_set.add(each_bond)
-            hg.add_node
-        hg.add_edge(node_set,
-                    attr_dict=bipartite_g.nodes[each_atom]['atom_attr'])
+        
+        edge = hg.add_edge(node_set,
+                attr_dict=bipartite_g.nodes[each_atom]['atom_attr'])
+        
+        # Extract atom index from the node name
+        atom_idx = int(each_atom.split('_')[1])
+        atom_to_edge[atom_idx] = edge
+    
+    # Add 3D coordinates if available
+    if has_coords:
+        conf = mol.GetConformer()
+        for atom_idx, edge in atom_to_edge.items():
+            pos = conf.GetAtomPosition(atom_idx)
+            hg.set_coordinates(edge, [pos.x, pos.y, pos.z])
+    
     return hg
 
 
 def hg_to_mol(hg, verbose=False):
-    """ convert a hypergraph into Mol object
+    """ convert a hypergraph into Mol object with 3D coordinates
 
     Parameters
     ----------
@@ -788,41 +848,31 @@ def hg_to_mol(hg, verbose=False):
             elif hg.node_attr(each_node)['symbol'].bond_type == 12:
                 num_bond = 1
             else:
-                raise ValueError(f'too many bonds; {hg.node_attr(each_node)["bond_symbol"].bond_type}')
-            _ = mol.AddBond(atom_dict[edge_1],
-                            atom_dict[edge_2],
-                            order=Chem.rdchem.BondType.values[num_bond])
-            bond_idx = mol.GetBondBetweenAtoms(atom_dict[edge_1], atom_dict[edge_2]).GetIdx()
+                raise NotImplementedError('unsupported bond type')
+            try:
+                mol.AddBond(atom_dict[edge_1], atom_dict[edge_2], 
+                            Chem.BondType.values[num_bond])
+            except Exception as e:
+                if verbose:
+                    print("Error", e)
+                    print(edge_1, edge_2, num_bond)
+            bond_set.add(edge_1+edge_2)
+            bond_set.add(edge_2+edge_1)
 
-            # stereo
-            mol.GetBondWithIdx(bond_idx).SetStereo(
-                Chem.rdchem.BondStereo.values[hg.node_attr(each_node)['symbol'].stereo])
-            bond_set.update([edge_1+edge_2])
-            bond_set.update([edge_2+edge_1])
-    mol.UpdatePropertyCache()
-    mol = mol.GetMol()
-    not_stereo_mol = deepcopy(mol)
-    if Chem.MolFromSmiles(Chem.MolToSmiles(not_stereo_mol)) is None:
-        raise RuntimeError('no valid molecule was obtained.')
-    try:
-        mol = set_stereo(mol)
-        is_stereo = True
-    except:
-        import traceback
-        traceback.print_exc()
-        is_stereo = False
-    mol_tmp = deepcopy(mol)
-    Chem.SetAromaticity(mol_tmp)
-    if Chem.MolFromSmiles(Chem.MolToSmiles(mol_tmp)) is not None:
-        mol = mol_tmp
-    else:
-        if Chem.MolFromSmiles(Chem.MolToSmiles(mol)) is None:
-            mol = not_stereo_mol
-    mol.UpdatePropertyCache()
-    if verbose:
-        return mol, is_stereo
-    else:
-        return mol
+    # Create a conformer to store 3D coordinates
+    conf = Chem.Conformer(mol.GetNumAtoms())
+    
+    # Set 3D coordinates for each atom
+    for edge, atom_idx in atom_dict.items():
+        if edge in hg.coordinates:
+            coords = hg.get_coordinates(edge)
+            conf.SetAtomPosition(atom_idx, Chem.rdGeometry.Point3D(
+                coords[0], coords[1], coords[2]))
+    
+    # Add the conformer to the molecule
+    mol.AddConformer(conf)
+    
+    return mol
 
 
 def atom_attr(atom, kekulize, terminal):
