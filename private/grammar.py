@@ -372,17 +372,17 @@ class ProductionRule(object):
             # Track added edges to avoid duplicates
             added_edges = set()
             
-            # Find the carbon edge in the original graph that should be preserved
-            original_carbon_edge = None
+            # Find anchor atoms - generally, any atom edge connected to ext_id nodes
+            anchor_atom_edges = set()
             for edge in original_hg.edges:
                 if edge != edge_name and "symbol" in original_hg.edge_attr(edge):
-                    symbol = original_hg.edge_attr(edge)["symbol"]
-                    if hasattr(symbol, "symbol") and symbol.symbol == "C":
-                        # This is a carbon atom
-                        for node in original_hg.nodes_in_edge(edge):
-                            if any(node_map_rhs.get(rhs_node) == node for rhs_node in self.rhs.nodes):
-                                # This carbon is connected to an anchor node
-                                original_carbon_edge = edge
+                    # Check if this edge is connected to any anchor bonds
+                    for node in original_hg.nodes_in_edge(edge):
+                        # Check if this bond node is mapped from an anchor bond in RHS
+                        for rhs_node, hg_node in node_map_rhs.items():
+                            if (hg_node == node and 
+                                "ext_id" in self.rhs.node_attr(rhs_node)):
+                                anchor_atom_edges.add(edge)
                                 break
 
             # Add hyperedges to hg
@@ -391,44 +391,58 @@ class ProductionRule(object):
                 for each_node in self.rhs.nodes_in_edge(each_edge):
                     node_list_hg.append(node_map_rhs[each_node])
                     
-                # Check if this is the anchor carbon (connected to ext_id nodes)
-                is_anchor_carbon = False
-                if "symbol" in self.rhs.edge_attr(each_edge):
-                    symbol = self.rhs.edge_attr(each_edge)["symbol"]
-                    if hasattr(symbol, "symbol") and symbol.symbol == "C":
-                        # This is a carbon atom, check if it's connected to an ext_id node
-                        for node in self.rhs.nodes_in_edge(each_edge):
-                            if "ext_id" in self.rhs.node_attr(node):
-                                is_anchor_carbon = True
-                                break
+                # Check if this is an anchor atom (edge connected to anchor bonds/nodes)
+                is_anchor_atom = False
+                for node in self.rhs.nodes_in_edge(each_edge):
+                    if "ext_id" in self.rhs.node_attr(node):
+                        is_anchor_atom = True
+                        break
                 
-                # If this is the anchor carbon and we found a matching original carbon,
-                # use the original carbon's edge ID and attributes
-                if is_anchor_carbon and original_carbon_edge is not None:
-                    # Use original carbon's edge ID
-                    edge_id = original_carbon_edge
-                    # Preserve its attributes
-                    attr_dict = original_hg.edge_attr(original_carbon_edge).copy()
+                # Find corresponding anchor atom in original graph
+                matching_original_edge = None
+                if is_anchor_atom:
+                    # Find which of the anchor_atom_edges in original_hg
+                    # shares the most bonds with this RHS edge
+                    max_shared_bonds = 0
+                    for original_edge in anchor_atom_edges:
+                        # Get the bonds this edge would have in the original
+                        original_bonds = set()
+                        for rhs_node in self.rhs.nodes_in_edge(each_edge):
+                            if "ext_id" in self.rhs.node_attr(rhs_node):
+                                original_bonds.add(node_map_rhs[rhs_node])
+                        
+                        # Count shared bonds with the original edge
+                        original_edge_bonds = set(original_hg.nodes_in_edge(original_edge))
+                        shared_bonds = len(original_bonds.intersection(original_edge_bonds))
+                        
+                        if shared_bonds > max_shared_bonds:
+                            max_shared_bonds = shared_bonds
+                            matching_original_edge = original_edge
+                
+                # If this is an anchor atom and we found a matching original atom,
+                # preserve all of its connections
+                if is_anchor_atom and matching_original_edge is not None:
+                    edge_id = matching_original_edge
+                    attr_dict = original_hg.edge_attr(matching_original_edge).copy()
                     
-                    # Include all original bonds except the one to the replaced hydrogen
-                    # First get all original bonds connected to the carbon
-                    original_bonds = set(original_hg.nodes_in_edge(original_carbon_edge))
+                    # Include all original bonds except those connecting to removed edges
+                    original_bonds = set(original_hg.nodes_in_edge(matching_original_edge))
                     
-                    # Add all these bonds to the node_list_hg if they still exist in the graph
+                    # Add all these bonds to node_list_hg if they still exist in the graph
                     for bond in original_bonds:
                         if bond in hg.nodes:
-                            # Skip the bond connecting to the replaced hydrogen
-                            skip_bond = False
-                            for edge in original_hg.edges:
-                                if (edge == edge_name and 
-                                    bond in original_hg.nodes_in_edge(edge)):
-                                    skip_bond = True
+                            # Skip bonds that only connect to the removed edge
+                            skip_bond = True
+                            for original_edge in original_hg.edges:
+                                if (original_edge != edge_name and 
+                                    bond in original_hg.nodes_in_edge(original_edge)):
+                                    skip_bond = False
                                     break
                             
                             if not skip_bond and bond not in node_list_hg:
                                 node_list_hg.append(bond)
-                    
-                    # Update the carbon edge with all bonds
+                
+                    # Update the atom edge with all bonds
                     if edge_id in hg.edges:
                         hg.remove_edge(edge_id)
                     hg.add_edge(node_list_hg, attr_dict=attr_dict, edge_name=edge_id)

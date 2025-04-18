@@ -218,171 +218,98 @@ def transfer_coordinates_from_rule(result, original_graph, rule, mapping=None):
     
     return result
 
-def transfer_coordinates_after_rule_application(result_hg, original_hg, rule_rhs, edge_map_rhs, replaced_edge):
-    """Transfer 3D coordinates after a production rule has been applied."""
+def transfer_coordinates_after_rule_application(result_hg, original_hg, rhs, edge_map_rhs=None, replaced_edge=None):
+    """
+    Transfer coordinates from original hypergraph and RHS to the result
+    after applying a production rule
     
-    # First, copy existing coordinates from original hypergraph
-    for edge in result_hg.edges:
-        if edge in original_hg.edges and edge in original_hg.coordinates:
-            result_hg.set_coordinates(edge, original_hg.get_coordinates(edge))
+    Parameters
+    ----------
+    result_hg : Hypergraph
+        The resulting hypergraph after rule application
+    original_hg : Hypergraph
+        The original hypergraph before rule application
+    rhs : Hypergraph
+        The right-hand side of the applied rule
+    edge_map_rhs : dict
+        Mapping from RHS edge names to result edge names
+    replaced_edge : str
+        Name of the edge that was replaced in the original hypergraph
     
-    # Debug: Show current state of coordinates
-    print(f"After copying original coordinates:")
-    print(f"  Edges with coordinates: {[e for e in result_hg.edges if e in result_hg.coordinates]}")
-    print(f"  Missing coordinates for: {[e for e in result_hg.edges if e not in result_hg.coordinates]}")
+    Returns
+    -------
+    result_hg : Hypergraph
+        The result hypergraph with updated coordinates
+    """
+    # Copy existing coordinates from original hypergraph
+    for edge in original_hg.edges:
+        if edge != replaced_edge and edge in result_hg.edges and edge in original_hg.coordinates:
+            result_hg.set_coordinates(edge, original_hg.coordinates[edge])
     
-    # Find edges with and without coordinates
-    edges_with_coords = set(edge for edge in result_hg.edges if edge in result_hg.coordinates)
-    edges_without_coords = set(result_hg.edges) - edges_with_coords
+    # Find anchor edges to compute transformation
+    # These are edges that exist in both the original hypergraph and the result
+    anchor_edges_orig = []
+    anchor_edges_rhs = []
     
-    # If all edges have coordinates already, we're done
-    if not edges_without_coords:
-        return result_hg
-    
-    # Find anchor points between original and RHS
-    # These are edges with the same name in both graphs
-    anchor_edges = []
-    for rhs_edge in rule_rhs.edges:
-        if rhs_edge in original_hg.edges and rhs_edge in original_hg.coordinates and rhs_edge in rule_rhs.coordinates:
-            anchor_edges.append(rhs_edge)
-    
-    # If no direct anchor edges, find edges that got transferred to result
-    if not anchor_edges:
-        anchor_edges_original = []
-        anchor_edges_rhs = []
-        for node in original_hg.nodes:
-            # Only use nodes that were preserved in the result
-            if node in result_hg.nodes:
-                # Find edges connected to this node in original graph
-                for edge in original_hg.edges:
-                    if node in original_hg.nodes_in_edge(edge) and edge in original_hg.coordinates:
-                        # Find corresponding RHS edge (should be connected to same node)
-                        for rhs_edge in rule_rhs.edges:
-                            if node in rule_rhs.nodes_in_edge(rhs_edge) and rhs_edge in rule_rhs.coordinates:
-                                anchor_edges_original.append(edge)
-                                anchor_edges_rhs.append(rhs_edge)
-                                break
-    else:
-        # Use exact matches as anchors
-        anchor_edges_original = anchor_edges
-        anchor_edges_rhs = anchor_edges
-    
-    # Debug: Show anchor edges
-    print(f"Anchor edges:")
-    print(f"  Original: {anchor_edges_original}")
+    # Find edges in RHS that connect to anchor nodes (ext_id)
+    for edge in rhs.edges:
+        is_anchor = False
+        for node in rhs.nodes_in_edge(edge):
+            if "ext_id" in rhs.node_attr(node):
+                is_anchor = True
+                break
+        
+        if is_anchor and edge in rhs.coordinates and edge_map_rhs.get(edge) in result_hg.edges:
+            mapped_edge = edge_map_rhs[edge]
+            
+            # Find corresponding edge in original hypergraph
+            for orig_edge in original_hg.edges:
+                if orig_edge in result_hg.edges and orig_edge == mapped_edge:
+                    # This is a preserved edge, use it as an anchor
+                    if orig_edge in original_hg.coordinates:
+                        anchor_edges_orig.append(orig_edge)
+                        anchor_edges_rhs.append(edge)
+        
+    # Debug info
+    print("Anchor edges:")
+    print(f"  Original: {anchor_edges_orig}")
     print(f"  RHS: {anchor_edges_rhs}")
     
-    # Backup approach - if we have a carbon atom in both, use that
-    if not anchor_edges_original:
-        for edge in original_hg.edges:
-            if (edge in original_hg.coordinates and 
-                hasattr(original_hg.edge_attr(edge)['symbol'], 'symbol') and 
-                original_hg.edge_attr(edge)['symbol'].symbol == 'C'):
-                for rhs_edge in rule_rhs.edges:
-                    if (rhs_edge in rule_rhs.coordinates and 
-                        hasattr(rule_rhs.edge_attr(rhs_edge)['symbol'], 'symbol') and 
-                        rule_rhs.edge_attr(rhs_edge)['symbol'].symbol == 'C'):
-                        anchor_edges_original.append(edge)
-                        anchor_edges_rhs.append(rhs_edge)
-                        break
-                break
-    
-    # If we still have no anchor points, we need a different approach
-    if not anchor_edges_original:
-        print("WARNING: No anchor points found between original and RHS")
+    # Calculate transformation to align RHS with original structure
+    if anchor_edges_orig and anchor_edges_rhs:
+        # Collect coordinates for anchor points
+        orig_coords = np.array([original_hg.coordinates[e] for e in anchor_edges_orig])
+        rhs_coords = np.array([rhs.coordinates[e] for e in anchor_edges_rhs])
         
-        # Map RHS edges to result edges based on edge_map_rhs
+        # There are two ways to fix this:
+        
+        # Option 1: Create connection_points for align_substructure
+        connection_points = list(zip(range(len(anchor_edges_orig)), range(len(anchor_edges_rhs))))
+        
+        # Option 2: Use calculate_optimal_transform which only needs two point sets
+        R, t = calculate_optimal_transform(rhs_coords, orig_coords)
+        
+        print("Calculated transformation:")
+        print(f"  Rotation: {R}")
+        print(f"  Translation: {t}")
+        
+        # Apply transformation to all RHS coordinates and copy to result
         for rhs_edge, result_edge in edge_map_rhs.items():
-            if rhs_edge in rule_rhs.coordinates and result_edge in edges_without_coords:
-                # Direct transfer without transformation
-                result_hg.set_coordinates(result_edge, rule_rhs.get_coordinates(rhs_edge))
+            if rhs_edge in rhs.coordinates and result_edge not in result_hg.coordinates:
+                # Transform coordinates
+                coords = rhs.coordinates[rhs_edge]
+                new_coords = np.dot(R, coords) + t
                 
-        # Edge names in RHS might directly match edge names in result
-        for edge in edges_without_coords:
-            if edge in rule_rhs.coordinates:
-                result_hg.set_coordinates(edge, rule_rhs.get_coordinates(edge))
-        
-        return result_hg
+                # Set in result
+                result_hg.set_coordinates(result_edge, new_coords)
     
-    # Calculate transformation between coordinate systems
-    anchor_points_original = np.array([original_hg.get_coordinates(edge) for edge in anchor_edges_original])
-    anchor_points_rhs = np.array([rule_rhs.get_coordinates(edge) for edge in anchor_edges_rhs])
-    
-    # If we have just one anchor point, we can only do translation
-    if len(anchor_edges_original) == 1:
-        # Calculate translation vector
-        translation = anchor_points_original[0] - anchor_points_rhs[0]
-        rotation = np.eye(3)  # Identity rotation
-    else:
-        # Calculate optimal rotation and translation
-        rotation, translation = calculate_optimal_transform(anchor_points_rhs, anchor_points_original)
-    
-    print(f"Calculated transformation:")
-    print(f"  Rotation: {rotation}")
-    print(f"  Translation: {translation}")
-    
-    # Apply transformation to all edges in RHS that don't have coordinates in result
-    edges_added = 0
-    
-    # First try using edge_map_rhs
-    for rhs_edge, result_edge in edge_map_rhs.items():
-        if result_edge in edges_without_coords and rhs_edge in rule_rhs.coordinates:
-            # Get RHS coordinates
-            rhs_coords = rule_rhs.get_coordinates(rhs_edge)
-            
-            # Apply transformation
-            transformed_coords = np.dot(rotation, rhs_coords) + translation
-            
-            # Set coordinates in result
-            result_hg.set_coordinates(result_edge, transformed_coords)
-            edges_added += 1
-    
-    # Try direct matching by edge name if any still missing
-    for edge in edges_without_coords:
-        if edge in result_hg.coordinates:
-            continue  # Already added
-            
-        if edge in rule_rhs.coordinates:
-            # Direct match by name
-            rhs_coords = rule_rhs.get_coordinates(edge)
-            transformed_coords = np.dot(rotation, rhs_coords) + translation
-            result_hg.set_coordinates(edge, transformed_coords)
-            edges_added += 1
-    
-    # Debug: Show updated coordinates
-    print(f"After transformation:")
-    print(f"  Added coordinates for {edges_added} edges")
-    print(f"  Edges with coordinates: {[e for e in result_hg.edges if e in result_hg.coordinates]}")
-    print(f"  Missing coordinates for: {[e for e in result_hg.edges if e not in result_hg.coordinates]}")
-    
-    # If we still have missing coordinates, try to guess based on the transformation
-    if edges_without_coords - set(result_hg.coordinates.keys()):
-        print("WARNING: Some edges still missing coordinates, trying to guess based on RHS")
-        for edge in edges_without_coords:
-            if edge not in result_hg.coordinates:
-                # Try to find a matching edge in RHS by symbol or pattern
-                for rhs_edge in rule_rhs.edges:
-                    if (rhs_edge in rule_rhs.coordinates and
-                        hasattr(rule_rhs.edge_attr(rhs_edge)['symbol'], 'symbol') and
-                        hasattr(result_hg.edge_attr(edge)['symbol'], 'symbol') and
-                        rule_rhs.edge_attr(rhs_edge)['symbol'].symbol == result_hg.edge_attr(edge)['symbol'].symbol):
-                        
-                        # Found a matching edge by symbol, transform coordinates
-                        rhs_coords = rule_rhs.get_coordinates(rhs_edge)
-                        transformed_coords = np.dot(rotation, rhs_coords) + translation
-                        result_hg.set_coordinates(edge, transformed_coords)
-                        break
-    
-    # Final verification
-    edges_with_coords_final = set(edge for edge in result_hg.edges if edge in result_hg.coordinates)
-    edges_without_coords_final = set(result_hg.edges) - edges_with_coords_final
-    
-    if edges_without_coords_final:
-        print(f"WARNING: {len(edges_without_coords_final)} edges still missing coordinates")
-        print(f"  Missing: {edges_without_coords_final}")
+    # Check if there are any edges still missing coordinates
+    missing_coords = [e for e in result_hg.edges if e not in result_hg.coordinates]
+    if missing_coords:
+        print(f"Missing coordinates for: {missing_coords}")
     else:
         print("SUCCESS: All edges have coordinates")
-        
+    
     return result_hg
 
 def calculate_optimal_transform(points_a, points_b):

@@ -710,6 +710,132 @@ class Hypergraph(object):
         """
         return self.coordinates.get(edge, np.array([0.0, 0.0, 0.0]))
 
+    def find_subgraph_match(self, pattern, anchor_edge=None):
+        """
+        Find instances where the pattern hypergraph appears in this hypergraph
+        
+        Parameters
+        ----------
+        pattern : Hypergraph
+            The pattern to search for
+        anchor_edge : str, optional
+            A specific edge in the hypergraph to anchor the search
+            
+        Returns
+        -------
+        list
+            List of dictionaries mapping pattern node/edge names to hypergraph node/edge names
+        """
+        matches = []
+        
+        # If no anchor is specified but we have a non-terminal edge, use it
+        if anchor_edge is None and hasattr(self, 'get_all_NT_edges'):
+            nt_edges = self.get_all_NT_edges()
+            if nt_edges:
+                anchor_edge = nt_edges[0]
+        
+        # If we have an anchor edge, start from there
+        if anchor_edge is not None and anchor_edge in self.edges:
+            # Get the nodes connected to this edge
+            anchor_nodes = self.nodes_in_edge(anchor_edge)
+            
+            # Find potential matches in the pattern
+            for pattern_edge in pattern.edges:
+                pattern_nodes = pattern.nodes_in_edge(pattern_edge)
+                
+                # Check if edge symbols match (for non-terminals)
+                if ('symbol' in self.edge_attr(anchor_edge) and 
+                    'symbol' in pattern.edge_attr(pattern_edge) and
+                    self.edge_attr(anchor_edge)['symbol'] == pattern.edge_attr(pattern_edge)['symbol']):
+                    
+                    # Start matching from here
+                    node_map = {}
+                    edge_map = {pattern_edge: anchor_edge}
+                    
+                    # Map the nodes
+                    if len(anchor_nodes) == len(pattern_nodes):
+                        # For simplicity we'll just do a 1:1 mapping
+                        # A real implementation would try different permutations
+                        for i, pattern_node in enumerate(pattern_nodes):
+                            node_map[pattern_node] = list(anchor_nodes)[i]
+                        
+                        # Try to extend the match
+                        complete_match = self._extend_match(pattern, node_map, edge_map)
+                        if complete_match:
+                            matches.append(complete_match)
+        
+        return matches
+
+    def _extend_match(self, pattern, node_map, edge_map):
+        """
+        Try to extend a partial match to cover the entire pattern
+        
+        Parameters
+        ----------
+        pattern : Hypergraph
+            The pattern to match
+        node_map : dict
+            Current mapping of pattern nodes to hypergraph nodes
+        edge_map : dict
+            Current mapping of pattern edges to hypergraph edges
+            
+        Returns
+        -------
+        dict or None
+            Complete mapping if successful, None otherwise
+        """
+        # Check if we've mapped all pattern edges
+        if len(edge_map) == len(pattern.edges):
+            return {'nodes': node_map, 'edges': edge_map}
+        
+        # Find an unmapped pattern edge that connects to mapped nodes
+        for pattern_edge in pattern.edges:
+            if pattern_edge not in edge_map:
+                pattern_nodes = pattern.nodes_in_edge(pattern_edge)
+                
+                # Check if this edge connects to any mapped nodes
+                connected_to_mapped = any(node in node_map for node in pattern_nodes)
+                
+                if connected_to_mapped:
+                    # Find potential matches in the hypergraph
+                    for hg_edge in self.edges:
+                        if hg_edge not in edge_map.values():
+                            hg_nodes = self.nodes_in_edge(hg_edge)
+                            
+                            # Check that all mapped pattern nodes map to the right hypergraph nodes
+                            valid_match = True
+                            for pattern_node in pattern_nodes:
+                                if pattern_node in node_map:
+                                    if node_map[pattern_node] not in hg_nodes:
+                                        valid_match = False
+                                        break
+                            
+                            if valid_match:
+                                # Try mapping unmapped nodes
+                                new_node_map = node_map.copy()
+                                for pattern_node in pattern_nodes:
+                                    if pattern_node not in new_node_map:
+                                        # Find unused hypergraph nodes
+                                        unused_hg_nodes = [n for n in hg_nodes if n not in new_node_map.values()]
+                                        if unused_hg_nodes:
+                                            new_node_map[pattern_node] = unused_hg_nodes[0]
+                                        else:
+                                            valid_match = False
+                                            break
+                                
+                                if valid_match:
+                                    # Create new edge map
+                                    new_edge_map = edge_map.copy()
+                                    new_edge_map[pattern_edge] = hg_edge
+                                    
+                                    # Recursively try to extend this match
+                                    complete_match = self._extend_match(pattern, new_node_map, new_edge_map)
+                                    if complete_match:
+                                        return complete_match
+        
+        # No complete match found
+        return None
+
 def mol_to_bipartite(mol, kekulize):
     """
     get a bipartite representation of a molecule.
